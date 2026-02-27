@@ -1,0 +1,118 @@
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class MarketSnapshot:
+    kospi_rsi: Optional[float] = None
+    kosdaq_rsi: Optional[float] = None
+
+def market_regime(snap: MarketSnapshot, bull: float = 55, defense: float = 45) -> str:
+    """
+    Returns: 'BULL' | 'NEUTRAL' | 'DEFENSE'
+    Fail-closed: if kospi_rsi missing -> NEUTRAL
+    """
+    if snap.kospi_rsi is None:
+        return "NEUTRAL"
+    if snap.kospi_rsi >= bull:
+        return "BULL"
+    if snap.kospi_rsi < defense:
+        return "DEFENSE"
+    return "NEUTRAL"
+
+def sector_bonus(sector: str, sectors: dict, strong_bonus: int = 10, normal_bonus: int = 5, strong_min_top_movers: int = 3) -> int:
+    """
+    sectors example:
+      {"Semiconductors": {"avg_change_pct": 1.2, "value_growth_pct": 15, "top_movers": 4}, ...}
+    """
+    if not sector or not isinstance(sectors, dict):
+        return 0
+    d = sectors.get(sector)
+    if not isinstance(d, dict):
+        return 0
+    top_movers = d.get("top_movers", 0) or 0
+    value_growth = d.get("value_growth_pct", 0) or 0
+    if top_movers >= strong_min_top_movers and value_growth >= 10:
+        return strong_bonus
+    if value_growth >= 5:
+        return normal_bonus
+    return 0
+
+from dataclasses import dataclass
+from typing import Optional, Dict, Any
+
+@dataclass
+class StockFeatures:
+    symbol: str
+    name: str
+    market_cap_krw: Optional[float]
+    price: Optional[float]
+    change_pct: Optional[float]
+    value_krw: Optional[float]
+    value_growth_pct: Optional[float]
+    rsi: Optional[float]
+    bull_div: Optional[bool]
+    macd_cross_up: Optional[bool]
+    double_bottom_ok: Optional[bool]
+    intraday_gain_pct: Optional[float]
+    close_to_high_gap_pct: Optional[float]
+    sector: Optional[str] = None
+    risk_flag: Optional[bool] = None
+
+def _fail_closed(*vals) -> bool:
+    return any(v is None for v in vals)
+
+def compute_structure_score(f: StockFeatures) -> Optional[int]:
+    if _fail_closed(f.bull_div, f.macd_cross_up, f.double_bottom_ok, f.rsi, f.value_krw):
+        return None
+    score = 0
+    score += 20 if f.bull_div else 0
+    score += 20 if f.macd_cross_up else 0
+    score += 20 if f.double_bottom_ok else 0
+    score += 20 if (40 <= float(f.rsi) <= 60) else 0
+    score += 20 if float(f.value_krw) > 0 else 0
+    return score
+
+def compute_profit_weight(f: StockFeatures) -> Optional[int]:
+    if _fail_closed(f.intraday_gain_pct, f.close_to_high_gap_pct, f.value_growth_pct):
+        return None
+    w = 0
+    if float(f.intraday_gain_pct) >= 4: w += 10
+    if float(f.intraday_gain_pct) >= 6: w += 15
+    if float(f.close_to_high_gap_pct) <= 2: w += 5
+    if float(f.value_growth_pct) >= 10: w += 5
+    return w
+
+def total_score(f: StockFeatures) -> Dict[str, Any]:
+    if f.risk_flag:
+        return {"structure": None, "profit": None, "total": None, "verdict": "BLOCKED_RISK"}
+    s = compute_structure_score(f)
+    p = compute_profit_weight(f)
+    if s is None or p is None:
+        return {"structure": s, "profit": p, "total": None, "verdict": "NO_DATA"}
+    return {"structure": s, "profit": p, "total": s + p, "verdict": "OK"}
+
+def position_weight(score, tiers, max_positions=6):
+    if score is None:
+        return 0.0
+    for t in tiers:
+        if score >= t["min_score"]:
+            return float(t["weight"])
+    return 0.0
+
+def apply_regime_and_size_adjustments(weight, regime, is_smallcap, smallcap_multiplier_neutral, smallcap_multiplier_defense):
+    if weight <= 0:
+        return 0.0
+    if regime == "DEFENSE":
+        return 0.0 if is_smallcap else weight * 0.5
+    if regime == "NEUTRAL" and is_smallcap:
+        return weight * float(smallcap_multiplier_neutral)
+    return weight
+
+def normalize_weights(items, max_total=1.0):
+    total = sum(i.get("weight", 0.0) for i in items)
+    if total <= 0:
+        return items
+    scale = min(1.0, float(max_total) / total)
+    for i in items:
+        i["weight"] = round(i.get("weight", 0.0) * scale, 4)
+    return items
